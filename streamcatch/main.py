@@ -1,1 +1,0 @@
-# Ponto de Entrada da Aplicação

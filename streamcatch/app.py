@@ -1,251 +1,207 @@
-import sys
 import os
-import requests
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton,
-    QComboBox, QFileDialog, QMessageBox, QProgressBar, QHBoxLayout
+    QWidget, QLabel, QVBoxLayout, QLineEdit, QPushButton, QComboBox,
+    QFileDialog, QMessageBox, QProgressBar, QHBoxLayout
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QPixmap, QFontMetrics
+from PyQt5.QtGui import QPixmap
+from urllib.request import urlopen
+from io import BytesIO
 import yt_dlp
 
+class DownloaderThread(QThread):
+    progresso = pyqtSignal(int)
+    mensagem = pyqtSignal(str)
+    finalizado = pyqtSignal()
 
-class FetchQualitiesThread(QThread):
-    qualities_found = pyqtSignal(list, str, str)  # qualidades, título, thumbnail
-    error = pyqtSignal(str)
-
-    def __init__(self, url):
+    def __init__(self, url, tipo, pasta, format_id=None):
         super().__init__()
         self.url = url
+        self.tipo = tipo
+        self.pasta = pasta
+        self.format_id = format_id
 
     def run(self):
         try:
-            ydl_opts = {"quiet": True, "skip_download": True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
-
-            title = info.get("title", "Título não disponível")
-            thumbnail_url = info.get("thumbnail", "")
-
-            # Filtra somente resoluções de vídeo válidas
-            formats = info.get("formats", [])
-            qualities = sorted(
-                {f.get("height") for f in formats if f.get("height")},
-                reverse=True
-            )
-            qualities = [f"{q}p" for q in qualities] if qualities else ["Qualidade não disponível"]
-
-            self.qualities_found.emit(qualities, title, thumbnail_url)
-        except Exception as e:
-            self.error.emit(f"Erro ao processar vídeo: {e}")
-
-
-class DownloadThread(QThread):
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(str)
-
-    def __init__(self, url, save_path, quality, mode):
-        super().__init__()
-        self.url = url
-        self.save_path = save_path
-        self.quality = quality
-        self.mode = mode
-
-    def run(self):
-        try:
-            out_template = os.path.join(self.save_path, "%(title)s.%(ext)s")
+            self.mensagem.emit("Conectando ao YouTube...")
             ydl_opts = {
-                "outtmpl": out_template,
-                "progress_hooks": [self.hook],
+                "outtmpl": os.path.join(self.pasta, "%(title)s.%(ext)s"),
+                "progress_hooks": [self.progresso_hook],
                 "quiet": True,
             }
+            if self.format_id:
+                ydl_opts["format"] = self.format_id
 
-            if self.mode == "Música (MP3)":
-                ydl_opts.update({
-                    "format": "bestaudio/best",
-                    "postprocessors": [{
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "192",
-                    }]
-                })
-            else:  # Vídeo MP4
-                # Converte o valor "1080p" para número
-                height = self.quality.rstrip("p")
-                ydl_opts["format"] = f"bestvideo[height<={height}]+bestaudio/best"
-
+            if self.tipo == "Música (MP3)":
+                ydl_opts["format"] = "bestaudio/best"
+                ydl_opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([self.url])
-
-            self.finished.emit(f"✅ Download concluído!\nSalvo em: {self.save_path}")
+            self.mensagem.emit("Download concluído!")
         except Exception as e:
-            self.finished.emit(f"❌ Erro ao baixar: {e}")
+            self.mensagem.emit(f"Erro: {e}")
+        finally:
+            self.finalizado.emit()
 
-    def hook(self, d):
+    def progresso_hook(self, d):
         if d.get("status") == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            downloaded = d.get("downloaded_bytes", 0)
-            if total:
-                percent = int(downloaded / total * 100)
-                self.progress.emit(percent)
-        elif d.get("status") == "finished":
-            self.progress.emit(100)
+            percent = d.get("_percent_str", "0%").replace("%", "").strip()
+            try:
+                self.progresso.emit(int(float(percent)))
+            except:
+                self.progresso.emit(0)
 
-
-class StreamCatch(QWidget):
+class StreamCatchApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.init_ui()
-
-    def init_ui(self):
-        self.setWindowTitle("StreamCatch")
+        self.setWindowTitle("StreamCatch Beta")
+        self.setGeometry(150, 150, 900, 600)
         self.setStyleSheet("""
-            QWidget { background-color: #121212; color: #f0f0f0; font-family: 'Segoe UI'; font-size: 14px; }
-            QPushButton { background-color: #e50914; color: white; border: none; padding: 10px; border-radius: 6px; }
-            QPushButton:hover { background-color: #b20710; }
-            QLineEdit, QComboBox { background-color: #1e1e1e; border: 1px solid #333; border-radius: 4px; padding: 6px; color: #f0f0f0; }
+            QWidget { background-color: #121212; color: white; font-size: 14px; }
+            QPushButton { background-color: #e50914; color: white; border-radius: 6px; padding: 10px; }
+            QPushButton:hover { background-color: #f44336; }
+            QLineEdit { background-color: #1e1e1e; padding: 8px; border-radius: 6px; border: 1px solid #333; color: white; }
+            QComboBox { background-color: #1e1e1e; color: white; border-radius: 6px; padding: 5px; border: 1px solid #333; }
         """)
 
         layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignTop)
 
-        # URL
-        self.url_label = QLabel("URL do vídeo/música:")
+        # Título
+        titulo = QLabel("🎬 StreamCatch", alignment=Qt.AlignCenter)
+        titulo.setStyleSheet("font-size: 26px; font-weight: bold; color: #e50914;")
+        layout.addWidget(titulo)
+
+        # Campo URL
         self.url_input = QLineEdit()
-        self.url_input.textChanged.connect(self.on_url_changed)
-        layout.addWidget(self.url_label)
+        self.url_input.setPlaceholderText("Cole o link do vídeo do YouTube aqui...")
+        self.url_input.textChanged.connect(self.atualizar_video_info)  # chama ao colar link
         layout.addWidget(self.url_input)
 
-        # Miniatura + título
-        self.title_thumb_layout = QHBoxLayout()
-        self.thumbnail_label = QLabel()
-        self.thumbnail_label.setFixedSize(80, 45)
-        self.thumbnail_label.setStyleSheet("border: 2px solid #e50914; border-radius: 6px;")
-        self.title_label = QLabel("")
-        self.title_label.setWordWrap(False)
-        self.title_label.setStyleSheet("color: #f0f0f0;")
-        self.title_thumb_layout.addWidget(self.thumbnail_label)
-        self.title_thumb_layout.addWidget(self.title_label)
-        layout.addLayout(self.title_thumb_layout)
+        # Miniatura
+        self.thumb_label = QLabel()
+        self.thumb_label.setFixedSize(320, 180)
+        self.thumb_label.setAlignment(Qt.AlignCenter)
+        self.thumb_label.setStyleSheet("border: 2px solid #e50914; border-radius: 6px; background: #000;")
+        layout.addWidget(self.thumb_label, alignment=Qt.AlignCenter)
 
-        # Tipo
-        self.mode_label = QLabel("Tipo de download:")
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Vídeo (MP4)", "Música (MP3)"])
-        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
-        layout.addWidget(self.mode_label)
-        layout.addWidget(self.mode_combo)
+        # Pasta de download
+        pasta_layout = QHBoxLayout()
+        self.pasta_label = QLabel("Destino: Nenhuma pasta selecionada")
+        self.botao_pasta = QPushButton("Escolher pasta")
+        self.botao_pasta.clicked.connect(self.escolher_pasta)
+        pasta_layout.addWidget(self.pasta_label)
+        pasta_layout.addWidget(self.botao_pasta)
+        layout.addLayout(pasta_layout)
+
+        # Tipo de download
+        self.combo_tipo = QComboBox()
+        self.combo_tipo.addItems(["Vídeo (MP4)", "Música (MP3)"])
+        self.combo_tipo.currentTextChanged.connect(self.atualizar_video_info)
+        layout.addWidget(self.combo_tipo)
 
         # Qualidade
-        self.quality_label = QLabel("Qualidade do vídeo:")
-        self.quality_combo = QComboBox()
-        self.quality_combo.setEnabled(False)
-        layout.addWidget(self.quality_label)
-        layout.addWidget(self.quality_combo)
+        self.combo_qualidade = QComboBox()
+        layout.addWidget(self.combo_qualidade)
 
-        # Pasta de destino
-        self.path_button = QPushButton("Escolher pasta de destino")
-        self.path_button.clicked.connect(self.select_path)
-        layout.addWidget(self.path_button)
-        self.path_display = QLabel("Pasta de destino: (não selecionada)")
-        layout.addWidget(self.path_display)
-
-        # Botão de download
-        self.download_button = QPushButton("Iniciar download")
-        self.download_button.clicked.connect(self.start_download)
-        layout.addWidget(self.download_button)
+        # Botão baixar
+        self.botao_baixar = QPushButton("Baixar")
+        self.botao_baixar.clicked.connect(self.iniciar_download)
+        layout.addWidget(self.botao_baixar)
 
         # Barra de progresso
-        self.progress = QProgressBar()
-        self.progress.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.progress)
+        self.progresso = QProgressBar()
+        layout.addWidget(self.progresso)
+
+        # Mensagem
+        self.mensagem = QLabel("", alignment=Qt.AlignCenter)
+        layout.addWidget(self.mensagem)
+
+        # Marca d'água / Sobre
+        self.marca = QLabel("StreamCatch Beta - Desenvolvido por Ailton Junior", alignment=Qt.AlignRight)
+        self.marca.setStyleSheet("font-size: 10px; color: #888888; margin-top: 10px;")
+        layout.addWidget(self.marca)
 
         self.setLayout(layout)
-        self.save_path = ""
+        self.pasta_saida = os.getcwd()
+        self.video_info = None
 
-    def elide_text(self, text, max_width, label):
-        metrics = QFontMetrics(label.font())
-        return metrics.elidedText(text, Qt.ElideRight, max_width)
+    def escolher_pasta(self):
+        pasta = QFileDialog.getExistingDirectory(self, "Escolher pasta de destino")
+        if pasta:
+            self.pasta_saida = pasta
+            self.pasta_label.setText(f"Destino: {pasta}")
 
-    def on_url_changed(self):
+    def atualizar_video_info(self):
         url = self.url_input.text().strip()
-        if "youtube.com" in url or "youtu.be" in url:
-            self.quality_combo.clear()
-            self.quality_combo.addItem("Carregando qualidades...")
-            self.quality_combo.setEnabled(False)
-            self.title_label.setText("Carregando título...")
-            self.thumbnail_label.clear()
-
-            self.thread_qualities = FetchQualitiesThread(url)
-            self.thread_qualities.qualities_found.connect(self.update_qualities)
-            self.thread_qualities.error.connect(self.show_error)
-            self.thread_qualities.start()
-
-    def update_qualities(self, qualities, title, thumbnail_url):
-        self.quality_combo.clear()
-        self.quality_combo.addItems(qualities)
-        self.quality_combo.setEnabled(True)
-        self.title_label.setText(self.elide_text(title, 300, self.title_label))
-
-        try:
-            response = requests.get(thumbnail_url)
-            pixmap = QPixmap()
-            pixmap.loadFromData(response.content)
-            self.thumbnail_label.setPixmap(pixmap.scaled(80, 45, Qt.KeepAspectRatio))
-        except:
-            self.thumbnail_label.clear()
-
-    def show_error(self, error_msg):
-        self.quality_combo.clear()
-        self.quality_combo.addItem("Erro ao obter qualidades")
-        self.quality_combo.setEnabled(False)
-        self.title_label.setText("")
-        self.thumbnail_label.clear()
-        QMessageBox.warning(self, "Erro", error_msg)
-
-    def on_mode_changed(self):
-        mode = self.mode_combo.currentText()
-        if mode == "Música (MP3)":
-            self.quality_combo.setEnabled(False)
-            self.quality_combo.clear()
-            self.quality_combo.addItem("Não aplicável (áudio apenas)")
-        else:
-            self.on_url_changed()
-
-    def select_path(self):
-        folder = QFileDialog.getExistingDirectory(self, "Escolher pasta para salvar")
-        if folder:
-            self.save_path = folder
-            self.path_display.setText(f"Pasta de destino: {folder}")
-
-    def start_download(self):
-        url = self.url_input.text().strip()
-        mode = self.mode_combo.currentText()
-        quality = self.quality_combo.currentText()
-
         if not url:
-            QMessageBox.warning(self, "Erro", "Informe a URL do vídeo ou música!")
             return
-        if not self.save_path:
-            QMessageBox.warning(self, "Erro", "Escolha uma pasta de destino!")
+        try:
+            ydl_opts = {"quiet": True, "skip_download": True, "no_warnings": True, "ignoreerrors": True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                self.video_info = info
+        except Exception as e:
+            self.mensagem.setText(f"Erro ao obter info: {e}")
             return
 
-        self.download_button.setEnabled(False)
-        self.progress.setValue(0)
+        # Atualizar thumbnail
+        try:
+            if info.get("thumbnails"):
+                thumb_url = info["thumbnails"][-1].get("url")
+                if thumb_url:
+                    data = urlopen(thumb_url).read()
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(data)
+                    self.thumb_label.setPixmap(pixmap.scaled(self.thumb_label.width(), self.thumb_label.height(), Qt.KeepAspectRatio))
+        except:
+            pass
 
-        self.thread = DownloadThread(url, self.save_path, quality, mode)
-        self.thread.progress.connect(self.progress.setValue)
-        self.thread.finished.connect(self.download_finished)
+        # Popular combo de qualidade (limpando duplicatas)
+        self.combo_qualidade.clear()
+        tipo = self.combo_tipo.currentText()
+        if tipo == "Vídeo (MP4)":
+            video_formats = [f for f in info["formats"] if f.get("vcodec") != "none"]
+            res_dict = {}
+            for f in video_formats:
+                h = f.get("height")
+                if h:
+                    if h not in res_dict or f.get("filesize", 0) > res_dict[h].get("filesize", 0):
+                        res_dict[h] = f
+            for h in sorted(res_dict.keys(), reverse=True):
+                f = res_dict[h]
+                label = f"{h}p"
+                self.combo_qualidade.addItem(label, f.get("format_id"))
+        else:  # Música
+            audio_formats = [f for f in info["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+            abr_dict = {}
+            for f in audio_formats:
+                abr = f.get("abr") or 128
+                if abr not in abr_dict or f.get("filesize", 0) > abr_dict[abr].get("filesize", 0):
+                    abr_dict[abr] = f
+            for abr in sorted(abr_dict.keys(), reverse=True):
+                f = abr_dict[abr]
+                label = f"{abr} kbps"
+                self.combo_qualidade.addItem(label, f.get("format_id"))
+
+    def iniciar_download(self):
+        url = self.url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Atenção", "Por favor, insira um link válido.")
+            return
+        tipo = self.combo_tipo.currentText()
+        format_id = self.combo_qualidade.currentData()
+        self.thread = DownloaderThread(url, tipo, self.pasta_saida, format_id=format_id)
+        self.thread.progresso.connect(self.progresso.setValue)
+        self.thread.mensagem.connect(self.mensagem.setText)
+        self.thread.finalizado.connect(lambda: QMessageBox.information(self, "Concluído", "Download finalizado!"))
         self.thread.start()
 
-    def download_finished(self, message):
-        QMessageBox.information(self, "StreamCatch", message)
-        self.download_button.setEnabled(True)
-        self.progress.setValue(100)
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = StreamCatch()
-    window.resize(460, 450)
-    window.show()
-    sys.exit(app.exec_())
+def iniciar_interface_principal():
+    """Chamada pelo main.py"""
+    janela = StreamCatchApp()
+    janela.show()
